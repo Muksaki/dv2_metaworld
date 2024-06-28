@@ -78,6 +78,7 @@ def _ssim(img1, img2, window, window_size, channel, size_average=True):
 
 class EnsembleWorldModel(nn.Module):
   def __init__(self, ensemble_num, step, config):
+    super(EnsembleWorldModel, self).__init__()
     self._ensemble_num = ensemble_num
     self._step = step
     self._config = config
@@ -87,7 +88,7 @@ class EnsembleWorldModel(nn.Module):
   def _set_up_wms(self):
     for _ in range(self._ensemble_num):
       wmi = WorldModel(self._step, self._config)
-      self.wms.append(wmi)
+      self._wms.append(wmi)
   
   def get_reward(self, f, s, a):
     return np.array([wmi.heads['reward'](f).mean for wmi in self._wms]).mean()

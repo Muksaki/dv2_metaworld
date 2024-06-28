@@ -26,7 +26,7 @@ to_np = lambda x: x.detach().cpu().numpy()
 
 class Dreamer(nn.Module):
 
-  def __init__(self, config, logger, dataset):
+  def __init__(self, config, logger):
     super(Dreamer, self).__init__()
     self._config = config
     self._logger = logger
@@ -46,7 +46,6 @@ class Dreamer(nn.Module):
         lambda x=config.actor_state_entropy: tools.schedule(x, self._step))
     config.imag_gradient_mix = (
         lambda x=config.imag_gradient_mix: tools.schedule(x, self._step))
-    self._dataset = dataset
     self._wm = models.WorldModel(self._step, config)
     self._ensemble_wm = models.EnsembleWorldModel(self._ensemble_number, self._step, config)
     self._task_behavior = models.ImagBehavior(
@@ -200,6 +199,70 @@ class Dreamer(nn.Module):
         self._logger.video('train_openl', to_np(openl))
         self._logger.write(fps=True)
 
+  def make_kfolddataset(self, episodes):
+    # import ipdb; ipdb.set_trace()
+    keys = episodes.keys()
+    import ipdb; ipdb.set_trace()
+    self._part_keys = self.split_dict_into_k_parts(list(keys), self._ensemble_number)
+    generator = self.sample_kepisodes(episodes, self._config.batch_length, self._config.oversample_ends)
+    dataset = self.from_kfoldgenerator(generator, self._config.batch_size)
+    self._dataset = dataset
+
+  def from_kfoldgenerator(self, generator, batch_size):
+    while True:
+      batches = []
+      for _ in range(batch_size):
+        data = next(generator)
+        batches.append(next(generator))
+      import ipdb; ipdb.set_trace()
+      batches = [[listi[i] for listi in batches] for i in range(self._ensemble_number)]
+      datas = []
+      for batch in batches:
+        data = {}
+        for key in batch[0].keys():
+          data[key] = []
+          for i in range(batch_size):
+            data[key].append(batch[i][key])
+          data[key] = np.stack(data[key], 0)
+        datas.append(data)
+      yield datas
+
+  def sample_kepisodes(self, episodes, length=None, balance=False, seed=0):
+    random = np.random.RandomState(seed)
+    while True:
+      data = []
+      for i in range(self._ensemble_number):
+        episode_key = random.choice(list(episodes.keys()))
+        while episode_key in self._part_keys[i]:
+          episode_key = random.choice(list(episodes.keys()))
+        episode = episodes[episode_key]
+        if length:
+          total = len(next(iter(episode.values())))
+          available = total - length
+          if available < 1:
+            print(f'Skipped short episode of length {available}.')
+            continue
+          if balance:
+            index = min(random.randint(0, total), available)
+          else:
+            index = int(random.randint(0, available + 1))
+          episode = {k: v[index: index + length] for k, v in episode.items()}
+          data.append(episode)
+      yield data
+
+  def split_dict_into_k_parts(self, keys, k):
+    import random
+    random.shuffle(keys)
+    n = len(keys)
+    part_size = n // k
+    parts = []
+    for i in range(k):
+        start_index = i * part_size
+        end_index = start_index + part_size if i < k - 1 else n
+        part_keys = keys[start_index:end_index]
+        parts.append(part_keys)
+    return parts
+
 
 def count_steps(folder):
   return sum(int(str(n).split('-')[-1][:-4]) - 1 for n in folder.glob('*.npz'))
@@ -343,9 +406,11 @@ def main(config):
   target_root = pathlib.Path(config.target_root).expanduser()
   # target_root = pathlib.Path('/data/mtpan/dataset/datasets_10_dreamerv3_100eps/plate_slide/eval_eps').expanduser()
   target_eps = tools.load_episodes(target_root, limit=config.dataset_size)
-  target_dataset = make_dataset(target_eps, config)
+  # import ipdb; ipdb.set_trace()
+  # target_dataset = make_dataset(target_eps, config)
 
-  agent = Dreamer(config, logger, target_dataset).to(config.device)
+  agent = Dreamer(config, logger).to(config.device)
+  agent.make_kfolddataset(target_eps)
   agent.requires_grad_(requires_grad=False)
   if (logdir / 'latest_model.pt').exists():
     agent.load_state_dict(torch.load(logdir / 'latest_model.pt'))
@@ -362,7 +427,7 @@ def main(config):
       logger.video('eval_openl', to_np(video_pred))
     # print('Start training.')
     print(i)
-    agent._train(next(target_dataset), i)
+    agent._train(i)
     # if i % 5000 == 0:
     #   torch.save(agent.state_dict(), logdir / 'latest_model.pt')
     if i % 100000 == 0 and i != 0:
