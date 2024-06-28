@@ -196,6 +196,7 @@ class WorldModel(nn.Module):
     return post, context, metrics
 
   def preprocess(self, obs):
+    import ipdb; ipdb.set_trace()
     obs = obs.copy()
     obs['image'] = torch.Tensor(obs['image']) / 255.0 - 0.5
     if self._config.clip_rewards == 'tanh':
