@@ -38,6 +38,7 @@ class Dreamer(nn.Module):
         config.expl_until / config.action_repeat))
     self._metrics = {}
     self._step = count_steps(config.traindir)
+    self._ensemble_number = config.ensemble_number
     # Schedules.
     config.actor_entropy = (
         lambda x=config.actor_entropy: tools.schedule(x, self._step))
@@ -47,14 +48,16 @@ class Dreamer(nn.Module):
         lambda x=config.imag_gradient_mix: tools.schedule(x, self._step))
     self._dataset = dataset
     self._wm = models.WorldModel(self._step, config)
+    self._ensemble_wm = models.EnsembleWorldModel(self._ensemble_number, self._step, config)
     self._task_behavior = models.ImagBehavior(
-        config, self._wm, config.behavior_stop_grad)
-    reward = lambda f, s, a: self._wm.heads['reward'](f).mean
+        config, self._ensemble_wm, config.behavior_stop_grad)
+    reward = lambda f, s, a: self._ensemble_wm.get_reward(f)
+    # reward = lambda f, s, a: self._wm.heads['reward'](f).mean
     self._expl_behavior = dict(
         greedy=lambda: self._task_behavior,
         random=lambda: expl.Random(config),
-        plan2explore=lambda: expl.Plan2Explore(config, self._wm, reward),
-    )[config.expl_behavior]()
+        plan2explore=lambda: expl.Plan2Explore(config, self._ensemble_wm, reward),
+    )[config.expl_behavior]() # greedy
 
   def __call__(self, obs, reset, state=None, reward=None, training=True):
     step = self._step
@@ -77,7 +80,8 @@ class Dreamer(nn.Module):
         for name, values in self._metrics.items():
           self._logger.scalar(name, float(np.mean(values)))
           self._metrics[name] = []
-        openl = self._wm.video_pred(next(self._dataset))
+        # Different World Model vedios should be logged respectively
+        openl = self._ensemble_wm._wms[0].video_pred(next(self._dataset))
         self._logger.video('train_openl', to_np(openl))
         self._logger.write(fps=True)
 

@@ -76,6 +76,24 @@ def _ssim(img1, img2, window, window_size, channel, size_average=True):
         return ssim_map.mean(1).mean(1).mean(1)
 
 
+class EnsembleWorldModel(nn.Module):
+  def __init__(self, ensemble_num, step, config):
+    self._ensemble_num = ensemble_num
+    self._step = step
+    self._config = config
+    self._wms = []
+    self._set_up_wms()
+
+  def _set_up_wms(self):
+    for _ in range(self._ensemble_num):
+      wmi = WorldModel(self._step, self._config)
+      self.wms.append(wmi)
+  
+  def get_reward(self, f, s, a):
+    return np.array([wmi.heads['reward'](f).mean for wmi in self._wms]).mean()
+
+
+
 class WorldModel(nn.Module):
 
   def __init__(self, step, config):

@@ -32,6 +32,7 @@ defaults:
   clip_rewards: 'identity'
 
   # Model
+  ensemble_number: 5
   dyn_cell: 'gru'
   dyn_hidden: 200
   dyn_deter: 200
