@@ -89,10 +89,20 @@ class EnsembleWorldModel(nn.Module):
     for _ in range(self._ensemble_num):
       wmi = WorldModel(self._step, self._config)
       self._wms.append(wmi)
-  
-  def get_reward(self, f, s, a):
-    return np.array([wmi.heads['reward'](f).mean for wmi in self._wms]).mean()
 
+  def _train(self, data):
+    posts = []
+    contexts = []
+    metss = {}
+    for i in range(self._ensemble_num):
+      post_i, context_i, mets_i = self._wms[i]._train(data[i])
+      posts.append(post_i)
+      contexts.append(context_i)
+      met_i = {}
+      for name, value in mets_i.items():
+        namei = name + str(i)
+        met_i[namei] = value
+      metss.update(mets_i)
 
 
 class WorldModel(nn.Module):
@@ -148,6 +158,7 @@ class WorldModel(nn.Module):
 
     with tools.RequiresGrad(self):
       with torch.cuda.amp.autocast(self._use_amp):
+        import ipdb; ipdb.set_trace()
         embed = self.encoder(data)
         post, prior = self.dynamics.observe(embed, data['action'])
         if not train:
@@ -285,17 +296,17 @@ class ImagBehavior(nn.Module):
     else:
       feat_size = config.dyn_stoch + config.dyn_deter
     self.actor = networks.ActionHead(
-        feat_size,  # pytorch version
+        self._world_model._ensemble_num * feat_size,  # pytorch version
         config.num_actions, config.actor_layers, config.units, config.act,
         config.actor_dist, config.actor_init_std, config.actor_min_std,
         config.actor_dist, config.actor_temp, config.actor_outscale)
     self.value = networks.DenseHead(
-        feat_size,  # pytorch version
+        self._world_model._ensemble_num * feat_size,  # pytorch version
         [], config.value_layers, config.units, config.act,
         config.value_head)
     if config.slow_value_target or config.slow_actor_target:
       self._slow_value = networks.DenseHead(
-          feat_size,  # pytorch version
+          self._world_model._ensemble_num * feat_size,  # pytorch version
           [], config.value_layers, config.units, config.act)
       self._updates = 0
     kw = dict(wd=config.weight_decay, opt=config.opt, use_amp=self._use_amp)
@@ -316,6 +327,7 @@ class ImagBehavior(nn.Module):
       with torch.cuda.amp.autocast(self._use_amp):
         imag_feat, imag_state, imag_action = self._imagine(
             start, self.actor, self._config.imag_horizon, repeats)
+        import ipdb; ipdb.set_trace()
         reward = objective(imag_feat, imag_state, imag_action)
         actor_ent = self.actor(imag_feat).entropy()
         state_ent = self._world_model.dynamics.get_dist(
@@ -350,29 +362,39 @@ class ImagBehavior(nn.Module):
       metrics.update(self._value_opt(value_loss, self.value.parameters()))
     return imag_feat, imag_state, imag_action, weights, metrics
 
-  def _imagine(self, start, policy, horizon, repeats=None):
-    dynamics = self._world_model.dynamics
-    if repeats:
-      raise NotImplemented("repeats is not implemented in this version")
-    flatten = lambda x: x.reshape([-1] + list(x.shape[2:]))
-    start = {k: flatten(v) for k, v in start.items()}
-    def step(prev, _):
-      state, _, _ = prev
-      feat = dynamics.get_feat(state)
-      inp = feat.detach() if self._stop_grad_actor else feat
-      action = policy(inp).sample()
-      succ = dynamics.img_step(state, action, sample=self._config.imag_sample)
-      return succ, feat, action
-    feat = 0 * dynamics.get_feat(start)
-    action = policy(feat).mode()
-    succ, feats, actions = tools.static_scan(
-        step, [torch.arange(horizon)], (start, feat, action))
-    states = {k: torch.cat([
-        start[k][None], v[:-1]], 0) for k, v in succ.items()}
-    if repeats:
-      raise NotImplemented("repeats is not implemented in this version")
-
-    return feats, states, actions
+  def _imagine(self, starts, policy, horizon, repeats=None):
+    # policy = actor net
+    ensemble_feats = []
+    ensemble_states = []
+    ensemble_actions = []
+    for i in range(self._world_model._ensemble_num):
+      start = starts[i]
+      dynamics = self._world_model._wms[i].dynamics
+      if repeats:
+        raise NotImplemented("repeats is not implemented in this version")
+      flatten = lambda x: x.reshape([-1] + list(x.shape[2:]))
+      start = {k: flatten(v) for k, v in start.items()}
+      def step(prev, _):
+        state, _, _ = prev
+        feat = dynamics.get_feat(state)
+        inp = feat.detach() if self._stop_grad_actor else feat
+        action = policy(inp).sample()
+        succ = dynamics.img_step(state, action, sample=self._config.imag_sample)
+        return succ, feat, action
+      feat = 0 * dynamics.get_feat(start)
+      action = policy(feat).mode()
+      import ipdb; ipdb.set_trace()
+      succ, feats, actions = tools.static_scan(
+          step, [torch.arange(horizon)], (start, feat, action))
+      states = {k: torch.cat([
+          start[k][None], v[:-1]], 0) for k, v in succ.items()}
+      if repeats:
+        raise NotImplemented("repeats is not implemented in this version")
+      ensemble_feats.append(feats)
+      ensemble_actions.append(actions)
+      ensemble_states.append(states)
+    
+    return ensemble_feats, ensemble_states, ensemble_actions
 
   def _compute_target(
       self, imag_feat, imag_state, imag_action, reward, actor_ent, state_ent,

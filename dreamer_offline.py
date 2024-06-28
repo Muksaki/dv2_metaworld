@@ -46,11 +46,12 @@ class Dreamer(nn.Module):
         lambda x=config.actor_state_entropy: tools.schedule(x, self._step))
     config.imag_gradient_mix = (
         lambda x=config.imag_gradient_mix: tools.schedule(x, self._step))
-    self._wm = models.WorldModel(self._step, config)
+    # self._wm = models.WorldModel(self._step, config)
     self._ensemble_wm = models.EnsembleWorldModel(self._ensemble_number, self._step, config)
     self._task_behavior = models.ImagBehavior(
         config, self._ensemble_wm, config.behavior_stop_grad)
-    reward = lambda f, s, a: self._ensemble_wm.get_reward(f)
+    reward = lambda f, s, a: np.array([wmi.heads['reward'](f).mean 
+                                       for wmi in self._ensemble_wm._wms]).mean()
     # reward = lambda f, s, a: self._wm.heads['reward'](f).mean
     self._expl_behavior = dict(
         greedy=lambda: self._task_behavior,
@@ -134,58 +135,20 @@ class Dreamer(nn.Module):
       return torch.clip(torchd.normal.Normal(action, amount).sample(), -1, 1)
     raise NotImplementedError(self._config.action_noise)
 
-  # def _train(self, data, step):
-  #   metrics = {}
-  #   post, context, mets = self._wm._train(data)
-  #   metrics.update(mets)
-  #   start = post
-  #   if self._config.pred_discount:  # Last step could be terminal.
-  #     start = {k: v[:, :-1] for k, v in post.items()}
-  #     context = {k: v[:, :-1] for k, v in context.items()}
-  #   reward = lambda f, s, a: self._wm.heads['reward'](
-  #       self._wm.dynamics.get_feat(s)).mode()
-  #   metrics.update(self._task_behavior._train(start, reward)[-1])
-  #   if self._config.expl_behavior != 'greedy':
-  #     if self._config.pred_discount:
-  #       data = {k: v[:, :-1] for k, v in data.items()}
-  #     mets = self._expl_behavior.train(start, context, data)[-1]
-  #     metrics.update({'expl_' + key: value for key, value in mets.items()})
-  #   for name, value in metrics.items():
-  #     if not name in self._metrics.keys():
-  #       self._metrics[name] = [value]
-  #     else:
-  #       self._metrics[name].append(value)
-  #   if step % 1000 == 0:
-  #       for name, values in self._metrics.items():
-  #         self._logger.scalar(name, float(np.mean(values)))
-  #         self._metrics[name] = []
-  #       openl = self._wm.video_pred(data)
-  #       self._logger.video('train_openl', to_np(openl))
-  #       self._logger.write(fps=True)
-
-
   def _train(self, data, step):
     metrics = {}
     if step < 50000:
-      post, context, mets = self._wm._train(data)
+      post, context, mets = self._ensemble_wm._train(data)
       metrics.update(mets)
     else:
       # post = self._wm._train(data, train=False)
       # start = post
-      post, context, mets = self._wm._train(data)
+      post, context, mets = self._ensemble_wm._train(data)
       metrics.update(mets)
       start = post
-      # if self._config.pred_discount:  # Last step could be terminal.
-      #   start = {k: v[:, :-1] for k, v in post.items()}
-      #   context = {k: v[:, :-1] for k, v in context.items()}
-      reward = lambda f, s, a: self._wm.heads['reward'](
-          self._wm.dynamics.get_feat(s)).mode()
+      reward = lambda f, s, a: np.array([wmi.heads['reward'](
+          self._wm.dynamics.get_feat(s)).mode() for wmi in self._ensemble_wm._wms]).mean()
       metrics.update(self._task_behavior._train(start, reward)[-1])
-      # if self._config.expl_behavior != 'greedy':
-      #   if self._config.pred_discount:
-      #     data = {k: v[:, :-1] for k, v in data.items()}
-      #   mets = self._expl_behavior.train(start, context, data)[-1]
-      #   metrics.update({'expl_' + key: value for key, value in mets.items()})
     for name, value in metrics.items():
       if not name in self._metrics.keys():
         self._metrics[name] = [value]
@@ -202,7 +165,6 @@ class Dreamer(nn.Module):
   def make_kfolddataset(self, episodes):
     # import ipdb; ipdb.set_trace()
     keys = episodes.keys()
-    import ipdb; ipdb.set_trace()
     self._part_keys = self.split_dict_into_k_parts(list(keys), self._ensemble_number)
     generator = self.sample_kepisodes(episodes, self._config.batch_length, self._config.oversample_ends)
     dataset = self.from_kfoldgenerator(generator, self._config.batch_size)
@@ -214,7 +176,6 @@ class Dreamer(nn.Module):
       for _ in range(batch_size):
         data = next(generator)
         batches.append(next(generator))
-      import ipdb; ipdb.set_trace()
       batches = [[listi[i] for listi in batches] for i in range(self._ensemble_number)]
       datas = []
       for batch in batches:
@@ -427,7 +388,7 @@ def main(config):
       logger.video('eval_openl', to_np(video_pred))
     # print('Start training.')
     print(i)
-    agent._train(i)
+    agent._train(next(agent._dataset), i)
     # if i % 5000 == 0:
     #   torch.save(agent.state_dict(), logdir / 'latest_model.pt')
     if i % 100000 == 0 and i != 0:
