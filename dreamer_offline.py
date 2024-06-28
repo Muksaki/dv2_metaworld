@@ -336,7 +336,7 @@ def main(config):
   # ['coffee_button', 'door_close', 'faucet_open', 'handle_press', 'reach_wall', 'window_close']
   # button_press   drawer_open   handle_pull   plate_slide
 
-  target_root = pathlib.Path('/data/mtpan/code_icml2024/dreamer_pretrain/datasets_10_dreamerv3_200eps/drawer_open/eval_eps').expanduser()
+  target_root = pathlib.Path(config.target_root).expanduser()
   # target_root = pathlib.Path('/data/mtpan/dataset/datasets_10_dreamerv3_100eps/plate_slide/eval_eps').expanduser()
   target_eps = tools.load_episodes(target_root, limit=config.dataset_size)
   target_dataset = make_dataset(target_eps, config)
