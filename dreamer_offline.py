@@ -38,7 +38,7 @@ class Dreamer(nn.Module):
         config.expl_until / config.action_repeat))
     self._metrics = {}
     self._step = count_steps(config.traindir)
-    self._ensemble_number = config.ensemble_number
+    self._k = config.ensemble_number
     # Schedules.
     config.actor_entropy = (
         lambda x=config.actor_entropy: tools.schedule(x, self._step))
@@ -47,7 +47,7 @@ class Dreamer(nn.Module):
     config.imag_gradient_mix = (
         lambda x=config.imag_gradient_mix: tools.schedule(x, self._step))
     # self._wm = models.WorldModel(self._step, config)
-    self._ensemble_wm = models.EnsembleWorldModel(self._ensemble_number, self._step, config)
+    self._ensemble_wm = models.EnsembleWorldModel(self._k, self._step, config)
     self._task_behavior = models.ImagBehavior(
         config, self._ensemble_wm, config.behavior_stop_grad)
     reward = lambda f, s, a: np.array([wmi.heads['reward'](f).mean 
@@ -95,27 +95,27 @@ class Dreamer(nn.Module):
   def _policy(self, obs, state, training):
     if state is None:
       batch_size = len(obs['image'])
-      latent = self._wm.dynamics.initial(len(obs['image']))
+      latent = [wmi.dynamics.initial(len(obs['image'])) for wmi in self._ensemble_wm._wms]
       action = torch.zeros((batch_size, self._config.num_actions)).to(self._config.device)
     else:
       latent, action = state
-    embed = self._wm.encoder(self._wm.preprocess(obs))
-    latent, _ = self._wm.dynamics.obs_step(
-        latent, action, embed, self._config.collect_dyn_sample)
+    embed = [wmi.encoder(wmi.preprocess(obs)) for wmi in self._ensemble_wm._wms]
+    latent = [self._ensemble_wm._wms[i].dynamics.obs_step(
+        latent[i], action, embed[i], self._config.collect_dyn_sample)[0] for i in range(self._k)]
     if self._config.eval_state_mean:
       latent['stoch'] = latent['mean']
-    feat = self._wm.dynamics.get_feat(latent)
+    feat_merge = torch.cat([self._ensemble_wm._wms[i].dynamics.get_feat(latent[i]) for i in range(self._k)], dim=-1)
     if not training:
-      actor = self._task_behavior.actor(feat)
+      actor = self._task_behavior.actor(feat_merge)
       action = actor.mode()
     elif self._should_expl(self._step):
-      actor = self._expl_behavior.actor(feat)
+      actor = self._expl_behavior.actor(feat_merge)
       action = actor.sample()
     else:
-      actor = self._task_behavior.actor(feat)
+      actor = self._task_behavior.actor(feat_merge)
       action = actor.sample()
     logprob = actor.log_prob(action)
-    latent = {k: v.detach()  for k, v in latent.items()}
+    latent = [{k: v.detach()  for k, v in d.items()} for d in latent]
     action = action.detach()
     if self._config.actor_dist == 'onehot_gumble':
       action = torch.one_hot(torch.argmax(action, dim=-1), self._config.num_actions)
@@ -146,8 +146,12 @@ class Dreamer(nn.Module):
       post, context, mets = self._ensemble_wm._train(data)
       metrics.update(mets)
       start = post
-      reward = lambda f, s, a: np.array([wmi.heads['reward'](
-          self._wm.dynamics.get_feat(s)).mode() for wmi in self._ensemble_wm._wms]).mean()
+      def reward(f, s, a):
+        rewards = [self._ensemble_wm._wms[i].heads['reward'](
+          self._ensemble_wm._wms[i].dynamics.get_feat(s[i])).mode() for i in range(self._k)]
+        return torch.stack(rewards, dim=0).mean(dim=0)
+      # reward = lambda f, s, a: np.array([self._ensemble_wm._wms[i].heads['reward'](
+      #     self._ensemble_wm._wms[i].dynamics.get_feat(s[i])).mode() for i in range(self._k)]).mean()
       metrics.update(self._task_behavior._train(start, reward)[-1])
     for name, value in metrics.items():
       if not name in self._metrics.keys():
@@ -158,14 +162,14 @@ class Dreamer(nn.Module):
         for name, values in self._metrics.items():
           self._logger.scalar(name, float(np.mean(values)))
           self._metrics[name] = []
-        openl = self._wm.video_pred(data)
-        self._logger.video('train_openl', to_np(openl))
+        # openl = self._wm.video_pred(data)
+        # self._logger.video('train_openl', to_np(openl))
         self._logger.write(fps=True)
 
   def make_kfolddataset(self, episodes):
     # import ipdb; ipdb.set_trace()
     keys = episodes.keys()
-    self._part_keys = self.split_dict_into_k_parts(list(keys), self._ensemble_number)
+    self._part_keys = self.split_dict_into_k_parts(list(keys), self._k)
     generator = self.sample_kepisodes(episodes, self._config.batch_length, self._config.oversample_ends)
     dataset = self.from_kfoldgenerator(generator, self._config.batch_size)
     self._dataset = dataset
@@ -176,7 +180,7 @@ class Dreamer(nn.Module):
       for _ in range(batch_size):
         data = next(generator)
         batches.append(next(generator))
-      batches = [[listi[i] for listi in batches] for i in range(self._ensemble_number)]
+      batches = [[listi[i] for listi in batches] for i in range(self._k)]
       datas = []
       for batch in batches:
         data = {}
@@ -192,7 +196,7 @@ class Dreamer(nn.Module):
     random = np.random.RandomState(seed)
     while True:
       data = []
-      for i in range(self._ensemble_number):
+      for i in range(self._k):
         episode_key = random.choice(list(episodes.keys()))
         while episode_key in self._part_keys[i]:
           episode_key = random.choice(list(episodes.keys()))
@@ -385,9 +389,10 @@ def main(config):
       print('Start evaluation.')
       eval_policy = functools.partial(agent, training=False)
       tools.simulate(eval_policy, eval_envs, episodes=config.eval_num)
-      video_pred = agent._wm.video_pred(next(eval_dataset))
-      logger.video('eval_openl', to_np(video_pred))
-    # print('Start training.')
+      for j in range(config.ensemble_number):
+        video_pred = agent._ensemble_wm._wms[j].video_pred(next(eval_dataset))
+        logger.video(f'eval_openl{j}', to_np(video_pred))
+    print('Start training.')
     print(i)
     agent._train(next(agent._dataset), i)
     # if i % 5000 == 0:

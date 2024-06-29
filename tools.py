@@ -116,7 +116,7 @@ def simulate(agent, envs, steps=0, episodes=0, state=None):
   # Initialize or unpack simulation state.
   if state is None:
     step, episode = 0, 0
-    done = np.ones(len(envs), np.bool)
+    done = np.ones(len(envs), np.bool_)
     length = np.zeros(len(envs), np.int32)
     obs = [None] * len(envs)
     agent_state = None
@@ -131,6 +131,7 @@ def simulate(agent, envs, steps=0, episodes=0, state=None):
       for index, result in zip(indices, results):
         obs[index] = result
       reward = [reward[i]*(1-done[i]) for i in range(len(envs))]
+      agent_state = None
     # Step agents.
     obs = {k: np.stack([o[k] for o in obs]) for k in obs[0]}
     action, agent_state = agent(obs, done, agent_state, reward)
@@ -526,6 +527,8 @@ def static_scan(fn, inputs, start):
         for _last in last:
           if type(_last) == type({}):
             outputs.append({key: value.clone().unsqueeze(0) for key, value in _last.items()})
+          elif type(_last) == type([]):
+            outputs.append([{key: value.clone().unsqueeze(0) for key, value in d.items()} for d in _last])
           else:
             outputs.append(_last.clone().unsqueeze(0))
       flag = False
@@ -539,6 +542,11 @@ def static_scan(fn, inputs, start):
             for key in last[j].keys():
               outputs[j][key] = torch.cat([outputs[j][key],
                   last[j][key].unsqueeze(0)], dim=0)
+          elif type(last[j]) == type([]):
+            for i in range(len(last[j])):
+              for key in last[j][i].keys():
+                outputs[j][i][key] = torch.cat([outputs[j][i][key], 
+                  last[j][i][key].unsqueeze(0)], dim=0)
           else:
             outputs[j] = torch.cat([outputs[j], last[j].unsqueeze(0)], dim=0)
   if type(last) == type({}):

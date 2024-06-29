@@ -300,7 +300,7 @@ metaworld:
   pretrain: 100
   num_teachers: 6
   eval_num: 10
-  target_root: /data/ytzheng/dataset/metaworld_200eps_501/button_press/eval_eps
+  target_root: /data/ytzheng/Datasets/datasets_10_dreamerv3_200eps/button_press/eval_eps
 
   # Environment
   time_limit: 500

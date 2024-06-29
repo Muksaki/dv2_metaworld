@@ -262,7 +262,6 @@ class ConvEncoder(nn.Module):
   def __call__(self, obs):
     x = obs['image'].reshape((-1,) + tuple(obs['image'].shape[-3:]))
     x = x.permute(0, 3, 1, 2)
-    import ipdb; ipdb.set_trace()
     x = self.layers(x)
     x = x.reshape([x.shape[0], np.prod(x.shape[1:])])
     shape = list(obs['image'].shape[:-3]) + [x.shape[-1]]

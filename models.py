@@ -8,7 +8,7 @@ import tools
 to_np = lambda x: x.detach().cpu().numpy()
 
 
-import cv2 
+# import cv2 
 from torch.autograd import Variable
 from math import exp
 import torch.nn.functional as F
@@ -26,12 +26,11 @@ def psnr(img1, img2):
     mse = (((img1 - img2)) ** 2).view(img1.shape[0], -1).mean(1, keepdim=True)
     return 20 * torch.log10(1.0 / torch.sqrt(mse))
 
-def erode(img_in, erode_size=4):
-    img_out = np.copy(img_in)
-    kernel = np.ones((erode_size, erode_size), np.uint8)
-    img_out = cv2.erode(img_out, kernel, iterations=1)
-
-    return img_out
+# def erode(img_in, erode_size=4):
+#     img_out = np.copy(img_in)
+#     kernel = np.ones((erode_size, erode_size), np.uint8)
+#     img_out = cv2.erode(img_out, kernel, iterations=1)
+#     return img_out
 
 def gaussian(window_size, sigma):
     gauss = torch.Tensor([exp(-(x - window_size // 2) ** 2 / float(2 * sigma ** 2)) for x in range(window_size)])
@@ -82,14 +81,8 @@ class EnsembleWorldModel(nn.Module):
     self._ensemble_num = ensemble_num
     self._step = step
     self._config = config
-    self._wms = []
+    self._wms = nn.ModuleList([WorldModel(self._step, self._config) for _ in range(self._ensemble_num)])
     self._use_amp = True if config.precision==16 else False
-    self._set_up_wms()
-
-  def _set_up_wms(self):
-    for _ in range(self._ensemble_num):
-      wmi = WorldModel(self._step, self._config)
-      self._wms.append(wmi)
 
   def _train(self, data):
     posts = []
@@ -105,6 +98,7 @@ class EnsembleWorldModel(nn.Module):
           namei = name + str(i)
           met_i[namei] = value
         metss.update(mets_i)
+    return posts, contexts, metss
 
 
 class WorldModel(nn.Module):
@@ -160,7 +154,6 @@ class WorldModel(nn.Module):
 
     with tools.RequiresGrad(self):
       with torch.cuda.amp.autocast(self._use_amp):
-        import ipdb; ipdb.set_trace()
         embed = self.encoder(data)
         post, prior = self.dynamics.observe(embed, data['action'])
         if not train:
@@ -198,7 +191,6 @@ class WorldModel(nn.Module):
     return post, context, metrics
 
   def preprocess(self, obs):
-    import ipdb; ipdb.set_trace()
     obs = obs.copy()
     obs['image'] = torch.Tensor(obs['image']) / 255.0 - 0.5
     if self._config.clip_rewards == 'tanh':
@@ -292,6 +284,7 @@ class ImagBehavior(nn.Module):
     self._use_amp = True if config.precision==16 else False
     self._config = config
     self._world_model = world_model
+    self._k = self._world_model._ensemble_num
     self._stop_grad_actor = stop_grad_actor
     self._reward = reward
     if config.dyn_discrete:
@@ -330,17 +323,18 @@ class ImagBehavior(nn.Module):
       with torch.cuda.amp.autocast(self._use_amp):
         imag_feat, imag_state, imag_action = self._imagine(
             start, self.actor, self._config.imag_horizon, repeats)
-        import ipdb; ipdb.set_trace()
         reward = objective(imag_feat, imag_state, imag_action)
         actor_ent = self.actor(imag_feat).entropy()
-        state_ent = self._world_model.dynamics.get_dist(
-            imag_state).entropy()
+        state_ent = torch.stack([self._world_model._wms[i].dynamics.get_dist(
+            imag_state[i]).entropy() for i in range(self._k)], dim=0).mean(dim=0)
         target, weights = self._compute_target(
             imag_feat, imag_state, imag_action, reward, actor_ent, state_ent,
             self._config.slow_actor_target)
+        
         actor_loss, mets = self._compute_actor_loss(
             imag_feat, imag_state, imag_action, target, actor_ent, state_ent,
             weights)
+        
         metrics.update(mets)
         if self._config.slow_value_target != self._config.slow_actor_target:
           target, weights = self._compute_target(
@@ -366,47 +360,45 @@ class ImagBehavior(nn.Module):
     return imag_feat, imag_state, imag_action, weights, metrics
 
   def _imagine(self, starts, policy, horizon, repeats=None):
-    # policy = actor net
-    ensemble_feats = []
-    ensemble_states = []
-    ensemble_actions = []
-    for i in range(self._world_model._ensemble_num):
-      start = starts[i]
-      dynamics = self._world_model._wms[i].dynamics
-      if repeats:
-        raise NotImplemented("repeats is not implemented in this version")
-      flatten = lambda x: x.reshape([-1] + list(x.shape[2:]))
-      start = {k: flatten(v) for k, v in start.items()}
-      def step(prev, _):
-        state, _, _ = prev
-        feat = dynamics.get_feat(state)
-        inp = feat.detach() if self._stop_grad_actor else feat
-        action = policy(inp).sample()
-        succ = dynamics.img_step(state, action, sample=self._config.imag_sample)
-        return succ, feat, action
-      feat = 0 * dynamics.get_feat(start)
-      action = policy(feat).mode()
-      import ipdb; ipdb.set_trace()
-      succ, feats, actions = tools.static_scan(
-          step, [torch.arange(horizon)], (start, feat, action))
-      states = {k: torch.cat([
-          start[k][None], v[:-1]], 0) for k, v in succ.items()}
-      if repeats:
-        raise NotImplemented("repeats is not implemented in this version")
-      ensemble_feats.append(feats)
-      ensemble_actions.append(actions)
-      ensemble_states.append(states)
-    
-    return ensemble_feats, ensemble_states, ensemble_actions
+    # policy = actor net, one for all wms
+    # For all steps in imagination, the action is shared but dynamics are different.
+    # for i in range(self._k):
+    #   start = starts[i]
+    #   dynamics = self._world_model._wms[i].dynamics
+      # if repeats:
+      #   raise NotImplemented("repeats is not implemented in this version")
+    flatten = lambda x: x.reshape([-1] + list(x.shape[2:]))
+    starts = [{k: flatten(v) for k, v in start.items()} for start in starts]
+    def step(prev, _):
+      state, _, _ = prev # state is a list length of _k
+      feat_merge = [self._world_model._wms[i].dynamics.get_feat(state[i]) for i in range(self._k)]
+      feat_merge = torch.cat(feat_merge, dim=1)
+      inp = feat_merge.detach() if self._stop_grad_actor else feat_merge
+      action = policy(inp).sample()
+      succs = [self._world_model._wms[i].dynamics.img_step(state[i], action, sample=self._config.imag_sample) for i in range(self._k)]
+      return succs, feat_merge, action
+    feat_merge_start = 0 * torch.cat([self._world_model._wms[i].dynamics.get_feat(starts[i]) for i in range(self._k)], dim=1)
+    # merge all feats into one and feed into policy
+    action = policy(feat_merge_start).mode()
+    succs, feats, actions = tools.static_scan(
+        step, [torch.arange(horizon)], (starts, feat_merge_start, action))
+    states = [{k: torch.cat([starts[i][k][None], v[:-1]], 0) for k, v in succs[i].items()} for i in range(self._k)]
+    if repeats:
+      raise NotImplemented("repeats is not implemented in this version")
+    return feats, states, actions
 
   def _compute_target(
       self, imag_feat, imag_state, imag_action, reward, actor_ent, state_ent,
       slow):
-    if 'discount' in self._world_model.heads:
-      inp = self._world_model.dynamics.get_feat(imag_state)
-      discount = self._world_model.heads['discount'](inp).mean
-    else:
-      discount = self._config.discount * torch.ones_like(reward)
+    discounts = []
+    for i in range(self._k):
+      if 'discount' in self._world_model._wms[i].heads:
+        inp = self._world_model._wms[i].dynamics.get_feat(imag_state[i])
+        discount = self._world_model._wms[i].heads['discount'](inp).mean
+      else:
+        discount = self._config.discount * torch.ones_like(reward)
+      discounts.append(discount)
+    discounts = torch.stack(discounts, dim=0).mean(dim=0)
     if self._config.future_entropy and self._config.actor_entropy() > 0:
       reward += self._config.actor_entropy() * actor_ent
     if self._config.future_entropy and self._config.actor_state_entropy() > 0:
@@ -416,10 +408,10 @@ class ImagBehavior(nn.Module):
     else:
       value = self.value(imag_feat).mode()
     target = tools.lambda_return(
-        reward[:-1], value[:-1], discount[:-1],
+        reward[:-1], value[:-1], discounts[:-1],
         bootstrap=value[-1], lambda_=self._config.discount_lambda, axis=0)
     weights = torch.cumprod(
-        torch.cat([torch.ones_like(discount[:1]), discount[:-1]], 0), 0).detach()
+        torch.cat([torch.ones_like(discounts[:1]), discounts[:-1]], 0), 0).detach()
     return target, weights
 
   def _compute_actor_loss(
