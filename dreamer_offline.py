@@ -376,6 +376,7 @@ def main(config):
   if (logdir / 'latest_model.pt').exists():
     agent.load_state_dict(torch.load(logdir / 'latest_model.pt'))
     agent._should_pretrain._once = False
+    print("Loaded Latest Model!")
 
   state = None
   for i in range(500000):

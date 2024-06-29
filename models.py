@@ -83,6 +83,7 @@ class EnsembleWorldModel(nn.Module):
     self._step = step
     self._config = config
     self._wms = []
+    self._use_amp = True if config.precision==16 else False
     self._set_up_wms()
 
   def _set_up_wms(self):
@@ -94,15 +95,16 @@ class EnsembleWorldModel(nn.Module):
     posts = []
     contexts = []
     metss = {}
-    for i in range(self._ensemble_num):
-      post_i, context_i, mets_i = self._wms[i]._train(data[i])
-      posts.append(post_i)
-      contexts.append(context_i)
-      met_i = {}
-      for name, value in mets_i.items():
-        namei = name + str(i)
-        met_i[namei] = value
-      metss.update(mets_i)
+    with torch.cuda.amp.autocast(self._use_amp):
+      for i in range(self._ensemble_num):
+        post_i, context_i, mets_i = self._wms[i]._train(data[i])
+        posts.append(post_i)
+        contexts.append(context_i)
+        met_i = {}
+        for name, value in mets_i.items():
+          namei = name + str(i)
+          met_i[namei] = value
+        metss.update(mets_i)
 
 
 class WorldModel(nn.Module):
